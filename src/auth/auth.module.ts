@@ -21,7 +21,9 @@ import { EmailService } from './email.service';
       inject: [ConfigService],
       useFactory: async (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET') || 'default_secret',
-        signOptions: { expiresIn: configService.get<string>('JWT_EXPIRES_IN') || '1h' },
+        signOptions: {
+          expiresIn: configService.get<string>('JWT_EXPIRES_IN') || '1h',
+        },
       }),
     }),
   ],
@@ -29,4 +31,4 @@ import { EmailService } from './email.service';
   providers: [AuthService, JwtStrategy, EmailService],
   exports: [AuthService],
 })
-export class AuthModule { }
+export class AuthModule {}

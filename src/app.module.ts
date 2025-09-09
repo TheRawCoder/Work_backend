@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
+import { TicketModule } from './ticket/ticket.module'; // ✅ plural
 
 @Module({
   imports: [
@@ -12,14 +13,15 @@ import { AdminModule } from './admin/admin.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: async (configService: ConfigService) => ({
-        uri: configService.get<string>('MONGO_URI'), // ✅ matches your .env
+        uri: configService.get<string>('MONGO_URI'),
       }),
     }),
     UsersModule,
     AuthModule,
     AdminModule,
+    TicketModule, // ✅ singular fixed → plural
   ],
   controllers: [],
   providers: [],
 })
-export class AppModule { }
+export class AppModule {}
