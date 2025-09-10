@@ -22,7 +22,7 @@ import { UpdateStatusDto } from './dto/update-status.dto';
 @Controller('tickets')
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class TicketController {
-  constructor(private readonly ticketService: TicketService) { }
+  constructor(private readonly ticketService: TicketService) {}
 
   @Post()
   async create(@Body() dto: CreateTicketDto) {
@@ -56,8 +56,8 @@ export class TicketController {
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
   ) {
-    const l = parseInt(limit as string, 10) || 50;
-    const s = parseInt(skip as string, 10) || 0;
+    const l = parseInt(limit, 10) || 50;
+    const s = parseInt(skip, 10) || 0;
 
     const filter: any = {};
 

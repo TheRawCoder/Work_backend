@@ -5,6 +5,7 @@ import { UsersModule } from './users/users.module';
 import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { TicketModule } from './ticket/ticket.module'; // ✅ plural
+import { UploadModule } from './upload/upload.module';
 
 @Module({
   imports: [
@@ -19,7 +20,8 @@ import { TicketModule } from './ticket/ticket.module'; // ✅ plural
     UsersModule,
     AuthModule,
     AdminModule,
-    TicketModule, // ✅ singular fixed → plural
+    TicketModule,
+    UploadModule, // ✅ singular fixed → plural
   ],
   controllers: [],
   providers: [],

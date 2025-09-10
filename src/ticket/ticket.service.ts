@@ -19,7 +19,7 @@ export class TicketService {
   constructor(
     @InjectModel(Ticket.name) private ticketModel: Model<TicketDocument>,
     @InjectModel(Counter.name) private counterModel: Model<CounterDocument>,
-  ) { }
+  ) {}
 
   private async getNextSequence(key = 'ticket'): Promise<number> {
     const updated = await this.counterModel
@@ -91,7 +91,7 @@ export class TicketService {
       .find(filter)
       .limit(limit)
       .skip(skip)
-      .sort(sort as any)
+      .sort(sort)
       .exec();
     const total = await this.ticketModel.countDocuments(filter).exec();
     return { total, items };
@@ -109,16 +109,20 @@ export class TicketService {
       console.debug(`TicketService.findById called with: "${incoming}"`);
 
       // 1) Exact ticketRefId (e.g. "TKT-0001")
-      const byRefExact = await this.ticketModel.findOne({ ticketRefId: incoming }).exec();
+      const byRefExact = await this.ticketModel
+        .findOne({ ticketRefId: incoming })
+        .exec();
       if (byRefExact) {
         console.debug('findById -> matched by ticketRefId (exact)');
         return byRefExact;
       }
 
       // 2) Case-insensitive ticketRefId (covers casing differences)
-      const byRefCi = await this.ticketModel.findOne({
-        ticketRefId: { $regex: `^${incoming}$`, $options: 'i' }
-      }).exec();
+      const byRefCi = await this.ticketModel
+        .findOne({
+          ticketRefId: { $regex: `^${incoming}$`, $options: 'i' },
+        })
+        .exec();
       if (byRefCi) {
         console.debug('findById -> matched by ticketRefId (case-insensitive)');
         return byRefCi;
@@ -135,7 +139,9 @@ export class TicketService {
 
       // 4) If incoming is numeric only, try serialNumber
       if (/^\d+$/.test(incoming)) {
-        const bySerial = await this.ticketModel.findOne({ serialNumber: Number(incoming) }).exec();
+        const bySerial = await this.ticketModel
+          .findOne({ serialNumber: Number(incoming) })
+          .exec();
         if (bySerial) {
           console.debug('findById -> matched by serialNumber');
           return bySerial;
@@ -143,13 +149,17 @@ export class TicketService {
       }
 
       // 5) Try alternate ticketRefId forms (add/remove TKT- prefix)
-      const altCandidate = incoming.startsWith('TKT-') ? incoming.replace(/^TKT-/i, '') : `TKT-${incoming}`;
-      const altMatch = await this.ticketModel.findOne({
-        $or: [
-          { ticketRefId: altCandidate },
-          { ticketRefId: { $regex: `^${altCandidate}$`, $options: 'i' } }
-        ]
-      }).exec();
+      const altCandidate = incoming.startsWith('TKT-')
+        ? incoming.replace(/^TKT-/i, '')
+        : `TKT-${incoming}`;
+      const altMatch = await this.ticketModel
+        .findOne({
+          $or: [
+            { ticketRefId: altCandidate },
+            { ticketRefId: { $regex: `^${altCandidate}$`, $options: 'i' } },
+          ],
+        })
+        .exec();
       if (altMatch) {
         console.debug('findById -> matched by alternate ticketRefId form');
         return altMatch;
@@ -209,14 +219,16 @@ export class TicketService {
 
   async getStats() {
     // Aggregate counts by raw status
-    const agg = await this.ticketModel.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
-    ]).exec();
+    const agg = await this.ticketModel
+      .aggregate([
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+          },
+        },
+      ])
+      .exec();
 
     // Convert to object map
     const rawCounts: Record<string, number> = {};
@@ -229,7 +241,7 @@ export class TicketService {
       Processing: rawCounts['in_progress'] ?? 0,
       Raised: rawCounts['open'] ?? 0,
       Resolved: rawCounts['resolved'] ?? 0,
-      Rejected: rawCounts['closed'] ?? 0
+      Rejected: rawCounts['closed'] ?? 0,
     };
 
     return mapped;
