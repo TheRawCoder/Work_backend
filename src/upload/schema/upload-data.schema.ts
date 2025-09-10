@@ -1,4 +1,4 @@
-// upload/schema/upload-data.schema.ts
+// src/upload/schema/upload-data.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
 
@@ -15,14 +15,19 @@ export class UploadData {
   @Prop({ index: true, sparse: true })
   status?: string;
 
-  // createdAt will be provided by timestamps option
+  // createdAt is automatically added by timestamps:true
   @Prop({ index: true, sparse: true })
   createdAt?: Date;
 }
 
 export const UploadDataSchema = SchemaFactory.createForClass(UploadData);
 
-// Useful compound indexes - tailor to your common queries
+// 🔹 Indexes for common queries
 UploadDataSchema.index({ category: 1, status: 1 });
 UploadDataSchema.index({ createdAt: 1 });
-UploadDataSchema.index({ 'payload.ticketRefId': 1 });
+
+// 🔹 Unique index on Ticket Ref ID
+UploadDataSchema.index(
+  { 'payload.ticketRefId': 1 },
+  { unique: true, sparse: true }
+);
