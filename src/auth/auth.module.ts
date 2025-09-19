@@ -1,3 +1,4 @@
+// src/auth/auth.module.ts
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -15,11 +16,11 @@ import { EmailService } from './email.service';
     UsersModule,
     ConfigModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
-    MongooseModule.forFeature([{ name: OTP.name, schema: OTPSchema }]), // ✅ register OTP schema
+    MongooseModule.forFeature([{ name: OTP.name, schema: OTPSchema }], 'dashboard-data'),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => ({
+      useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET') || 'default_secret',
         signOptions: {
           expiresIn: configService.get<string>('JWT_EXPIRES_IN') || '1h',
@@ -31,4 +32,4 @@ import { EmailService } from './email.service';
   providers: [AuthService, JwtStrategy, EmailService],
   exports: [AuthService],
 })
-export class AuthModule {}
+export class AuthModule { }

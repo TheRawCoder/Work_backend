@@ -1,33 +1,36 @@
-// src/upload/schema/upload-data.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document } from 'mongoose';
+import { v4 as uuidv4 } from 'uuid';
 
 export type UploadDataDocument = UploadData & Document;
 
 @Schema({ timestamps: true })
 export class UploadData {
-  @Prop({ type: Object, required: true })
-  payload: Record<string, any>;
+  @Prop({ default: () => uuidv4(), unique: true })
+  ticketRefId: string;
 
-  @Prop({ index: true, sparse: true })
-  category?: string;
+  @Prop({ required: true })
+  description: string;
 
-  @Prop({ index: true, sparse: true })
-  status?: string;
+  @Prop()
+  remark: string;
 
-  // createdAt is automatically added by timestamps:true
-  @Prop({ index: true, sparse: true })
-  createdAt?: Date;
+  @Prop()
+  category: string;
+
+  @Prop()
+  subCategory: string;
+
+  @Prop({
+    required: true,
+    enum: ['Processing', 'Raised', 'Resolved', 'Rejected'],
+    default: 'Raised',
+  })
+  status: string;
 }
 
 export const UploadDataSchema = SchemaFactory.createForClass(UploadData);
-
-// 🔹 Indexes for common queries
-UploadDataSchema.index({ category: 1, status: 1 });
-UploadDataSchema.index({ createdAt: 1 });
-
-// 🔹 Unique index on Ticket Ref ID
 UploadDataSchema.index(
-  { 'payload.ticketRefId': 1 },
-  { unique: true, sparse: true }
+  { description: 1, category: 1, subCategory: 1 },
+  { unique: true },
 );

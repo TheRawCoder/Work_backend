@@ -1,384 +1,266 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment,
-                  @typescript-eslint/no-unsafe-member-access,
-                  @typescript-eslint/no-unsafe-call,
-                  @typescript-eslint/no-unsafe-return,
-                  @typescript-eslint/prefer-promise-reject-errors,
-                  @typescript-eslint/no-unsafe-argument,
-                  @typescript-eslint/no-unused-vars */
-
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as fs from 'fs';
 import * as path from 'path';
-import { parse as csvParse, format as csvFormat } from 'fast-csv';
-import ExcelJS from 'exceljs';
-import type { Response } from 'express';
+import * as crypto from 'crypto';
+import * as ExcelJS from 'exceljs';
+import csvParser from 'csv-parser';
+import pLimit from 'p-limit';
 import { UploadData, UploadDataDocument } from './schema/upload-data.schema';
 
 @Injectable()
-export class UploadService {
-  private readonly logger = new Logger(UploadService.name);
-
-  // tune this for your environment; larger batches reduce DB round-trips but use more memory
-  private readonly BATCH_SIZE = Number(process.env.BATCH_SIZE || 5000);
-
+export class UploadDataService {
   constructor(
-    @InjectModel(UploadData.name)
-    private readonly uploadModel: Model<UploadDataDocument>,
+    @InjectModel(UploadData.name, 'dashboard-data')
+    private readonly uploadDataModel: Model<UploadDataDocument>,
+
   ) { }
 
-  /**
-   * Top-level file parser entry
-   */
-  async parseAndStore(
-    filePath: string,
-    originalName?: string,
-  ): Promise<{ insertedCount: number; message?: string }> {
-    const ext = path.extname(originalName || filePath).toLowerCase();
-    let inserted = 0;
+  // --- Deduplicate based on description + category + subCategory
+  private async filterDuplicates(records: any[]): Promise<any[]> {
+    if (!records.length) return [];
+
+    const existing = await this.uploadDataModel.find({
+      $or: records.map(r => ({
+        description: r.description,
+        category: r.category,
+        subCategory: r.subCategory,
+      })),
+    }).select('description category subCategory').lean();
+
+    const existingKeys = new Set(
+      existing.map(e => `${e.description}||${e.category}||${e.subCategory}`)
+    );
+
+    return records.filter(
+      r => !existingKeys.has(`${r.description}||${r.category}||${r.subCategory}`)
+    );
+  }
+
+  // --- Upload CSV or Excel with file hash check
+  async parseFileAndSave(filePath: string, fileSize: number): Promise<any> {
     try {
-      if (ext === '.csv') {
-        inserted = await this._processCsv(filePath);
-      } else if (ext === '.xls' || ext === '.xlsx') {
-        inserted = await this._processXlsx(filePath);
-      } else {
-        throw new Error('Unsupported file type');
-      }
-
-      // remove uploaded file asynchronously
-      fs.unlink(filePath, (err) => {
-        if (err) this.logger.warn('Could not delete uploaded file: ' + err.message);
-      });
-
-      return { insertedCount: inserted, message: 'Imported successfully' };
-    } catch (err) {
-      this.logger.error(err);
-      // on failure try to delete
-      try {
+      const maxSize = 200 * 1024 * 1024; // 200MB
+      if (fileSize > maxSize) {
         fs.unlinkSync(filePath);
-      } catch (e) {
-        /* ignore */
+        throw new BadRequestException('File exceeds 200MB limit');
       }
-      throw err;
+
+      // --- Compute file hash
+      const fileBuffer = fs.readFileSync(filePath);
+      const fileHash = crypto.createHash('md5').update(fileBuffer).digest('hex');
+
+      const existingFile = await this.uploadDataModel.findOne({ fileHash });
+      if (existingFile) {
+        fs.unlinkSync(filePath);
+        throw new BadRequestException('File with the same content already exists');
+      }
+
+      // --- Parse CSV/Excel
+      const ext = path.extname(filePath).toLowerCase();
+      let result;
+      if (ext === '.csv') result = await this.handleCsv(filePath, fileHash);
+      else if (ext === '.xlsx') result = await this.handleExcel(filePath, fileHash);
+      else {
+        fs.unlinkSync(filePath);
+        throw new BadRequestException('Only CSV or Excel (.xlsx) allowed');
+      }
+
+      fs.unlinkSync(filePath);
+      return result;
+    } catch (error) {
+      console.error('❌ Parsing failed:', error);
+      throw new BadRequestException(error.message);
     }
   }
 
-  /**
-   * Map an incoming CSV/XLSX row to the UploadData document shape.
-   * Normalizes ticketRefId into payload.ticketRefId if possible and extracts category/status/createdAt.
-   */
-  private _mapRowToDocument(row: Record<string, any>) {
-    // Ticket Ref variants
-    const ticketRefRaw =
-      row['Ticket Ref ID'] ||
-      row['ticketRefId'] ||
-      row['ticket_ref_id'] ||
-      row['ticket_refid'] ||
-      row['TicketRefId'] ||
-      row['ticketRef'] ||
-      null;
-
-    const ticketRef =
-      typeof ticketRefRaw === 'string' && ticketRefRaw.trim() !== ''
-        ? ticketRefRaw.trim()
-        : undefined;
-
-    const doc: any = {
-      payload: { ...row },
-      category:
-        row['category'] || row['Category'] || row['category_name'] || row['Category Name'] || null,
-      status: row['status'] || row['Status'] || null,
-    };
-
-    if (ticketRef) {
-      // keep original casing for payload but ensure key exists
-      doc.payload.ticketRefId = ticketRef;
-    }
-
-    const createdVal =
-      row['createdAt'] || row['created_at'] || row['Created Date'] || row['created'] || row['CreatedAt'] || null;
-    if (createdVal) {
-      const d = new Date(createdVal);
-      if (!isNaN(d.getTime())) doc.createdAt = d;
-    }
-
-    return doc;
-  }
-
-  /**
-   * Flush a batch of docs to DB *efficiently* avoiding inserting duplicates by ticketRefId.
-   *
-   * Strategy:
-   * 1. Separate docs with ticketRefId and without.
-   * 2. For docs with ticketRefId, query DB once to get existing ticketRefId set for this batch.
-   * 3. Insert only those docs that don't exist (insertMany).
-   * 4. For docs without ticketRefId, do a plain insertMany (they cannot be deduped by ticketRefId).
-   *
-   * Returns number of newly inserted docs.
-   */
-  private async _flushBatch(batch: any[]): Promise<number> {
-    if (!batch || !batch.length) return 0;
-
-    const withRef = batch.filter((d) => d?.payload?.ticketRefId);
-    const withoutRef = batch.filter((d) => !d?.payload?.ticketRefId);
-
-    let inserted = 0;
-
-    // 1) For docs that have ticketRefId -> find which refs already exist
-    if (withRef.length) {
-      try {
-        const refs = Array.from(new Set(withRef.map((d) => d.payload.ticketRefId)));
-        // find existing docs for these refs
-        const existing = await this.uploadModel
-          .find({ 'payload.ticketRefId': { $in: refs } }, { 'payload.ticketRefId': 1 })
-          .lean();
-
-        const existingSet = new Set(existing.map((e) => e.payload?.ticketRefId).filter(Boolean));
-        // filter to only new docs
-        const toInsert = withRef.filter((d) => !existingSet.has(d.payload.ticketRefId));
-
-        if (toInsert.length) {
-          // insert in one shot
-          const res = await this.uploadModel.insertMany(toInsert, { ordered: false });
-          inserted += Array.isArray(res) ? res.length : 0;
-        }
-      } catch (e: any) {
-        // log more info for debugging
-        this.logger.warn('Error flushing batch (withRef): ' + (e && e.message ? e.message : JSON.stringify(e)));
-        // If the error contains partial inserts, try to count them
-        if (e && Array.isArray(e.insertedDocs)) {
-          inserted += e.insertedDocs.length;
-        }
-      }
-    }
-
-    // 2) For docs without ticketRefId -> insert directly
-    if (withoutRef.length) {
-      try {
-        const res = await this.uploadModel.insertMany(withoutRef, { ordered: false });
-        inserted += Array.isArray(res) ? res.length : 0;
-      } catch (e: any) {
-        this.logger.warn('Error flushing batch (withoutRef): ' + (e && e.message ? e.message : JSON.stringify(e)));
-        if (e && Array.isArray(e.insertedDocs)) inserted += e.insertedDocs.length;
-      }
-    }
-
-    return inserted;
-  }
-
-  /**
-   * CSV processing (streamed). Uses batching and _flushBatch to avoid duplicates.
-   */
-  private async _processCsv(filePath: string): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
+  // --- CSV handler with fileHash
+  private async handleCsv(filePath: string, fileHash: string): Promise<any> {
+    return new Promise((resolve, reject) => {
       const batch: any[] = [];
-      let inserted = 0;
-      const readStream = fs.createReadStream(filePath);
-      const csvStream = csvParse({ headers: true, ignoreEmpty: true, trim: true });
+      const chunkSize = 2000;
+      let totalCount = 0;
 
-      csvStream.on('error', (err) => {
-        this.logger.error('CSV parse error: ' + (err && (err as Error).message ? (err as Error).message : err));
-        reject(err);
-      });
+      const limit = pLimit(5);
+      const tasks: Promise<any>[] = [];
 
-      csvStream.on('data', async (row: any) => {
-        const doc = this._mapRowToDocument(row);
-        batch.push(doc);
+      fs.createReadStream(filePath)
+        .pipe(csvParser())
+        .on('data', row => {
+          const record = {
+            id: row.id || '',
+            description: String(row.description || '').slice(0, 16000),
+            remark: String(row.remark || '').slice(0, 16000),
+            category: row.category || '',
+            subCategory: row.subCategory || '',
+            status: row.status || 'Raised',
+            fileHash,
+          };
+          batch.push(record);
 
-        if (batch.length >= this.BATCH_SIZE) {
-          csvStream.pause();
-          try {
-            const toFlush = batch.splice(0, batch.length);
-            const added = await this._flushBatch(toFlush);
-            inserted += added;
-          } catch (e: any) {
-            this.logger.warn('Batch flush error (csv): ' + (e && e.message ? e.message : JSON.stringify(e)));
-          } finally {
-            csvStream.resume();
+          if (batch.length >= chunkSize) {
+            const currentBatch = batch.splice(0, batch.length);
+            tasks.push(limit(async () => {
+              const newRecords = await this.filterDuplicates(currentBatch);
+              if (newRecords.length) {
+                await this.uploadDataModel.insertMany(newRecords, { ordered: false });
+                totalCount += newRecords.length;
+              }
+            }));
           }
-        }
-      });
-
-      csvStream.on('end', async () => {
-        if (batch.length) {
+        })
+        .on('end', async () => {
           try {
-            const added = await this._flushBatch(batch.splice(0, batch.length));
-            inserted += added;
-          } catch (e: any) {
-            this.logger.warn('Final batch flush error (csv): ' + (e && e.message ? e.message : JSON.stringify(e)));
-          }
-        }
-        resolve(inserted);
-      });
+            if (batch.length > 0) {
+              tasks.push(limit(async () => {
+                const newRecords = await this.filterDuplicates(batch);
+                if (newRecords.length) {
+                  await this.uploadDataModel.insertMany(newRecords, { ordered: false });
+                  totalCount += newRecords.length;
+                }
+              }));
+            }
+            await Promise.all(tasks);
 
-      readStream.pipe(csvStream);
+            // ❌ Throw error if no new records were inserted
+            if (totalCount === 0) {
+              throw new BadRequestException('All records in the file already exist');
+            }
+
+            resolve({ message: 'File uploaded successfully', totalRecords: totalCount });
+          } catch (err) {
+            reject(err);
+          }
+        })
+        .on('error', err => reject(err));
     });
   }
 
-  /**
-   * XLSX processing (streamed). Uses batching and _flushBatch to avoid duplicates.
-   */
-  private async _processXlsx(filePath: string): Promise<number> {
-    const readStream = fs.createReadStream(filePath);
-
-    // ExcelJS streaming options (cast any to avoid types differences)
-    const options: Partial<any> = {
-      entries: 'emit',
-      sharedStrings: 'cache',
-      styles: 'ignore',
-      hyperlinks: 'ignore',
-      worksheets: 'emit',
-    };
-
-    // compatibility across exceljs versions
-    const WorkbookReaderAny: any =
-      (ExcelJS as any).stream?.xlsx?.WorkbookReader || (ExcelJS as any).stream?.WorkbookReader;
-    const workbookReader = new WorkbookReaderAny(readStream as any, options as any);
-
+  // --- Excel handler with fileHash
+  private async handleExcel(filePath: string, fileHash: string): Promise<any> {
+    const workbook = new ExcelJS.stream.xlsx.WorkbookReader(filePath, { entries: 'emit' });
     const batch: any[] = [];
-    let inserted = 0;
-    let headers: string[] = [];
+    const chunkSize = 2000;
+    let totalCount = 0;
+    const limit = pLimit(5);
+    const tasks: Promise<any>[] = [];
 
-    for await (const worksheetReader of workbookReader) {
-      for await (const row of worksheetReader) {
-        const values = (row as any).values as any[]; // ExcelJS row.values[0] often null
-        // determine header row
-        if (!headers.length) {
-          headers = values.slice(1).map((v) => (v !== undefined && v !== null ? String(v).trim() : ''));
-          // if header blank, keep scanning
-          if (headers.every((h) => h === '')) {
-            headers = [];
-            continue;
-          }
-          // header consumed; next iterations will be data rows
+    for await (const worksheet of workbook) {
+      let headers: string[] = [];
+
+      for await (const row of worksheet) {
+        if (row.number === 1) {
+          headers = (row.values as any[]).slice(1).map(v => v ? String(v).trim() : '');
           continue;
         }
 
-        const rowObj: any = {};
-        const cells = values.slice(1);
-        for (let i = 0; i < headers.length; i++) {
-          rowObj[headers[i] || `col_${i}`] = cells[i] !== undefined ? cells[i] : null;
+        const rowData: any = {};
+        (row.values as any[]).slice(1).forEach((val, idx) => {
+          rowData[headers[idx]] = val ? String(val).trim().slice(0, 16000) : '';
+        });
+        rowData.id = rowData.id || '';
+        rowData.status = rowData.status || 'Raised';
+        rowData.fileHash = fileHash;
+
+        batch.push(rowData);
+
+        if (batch.length >= chunkSize) {
+          const currentBatch = batch.splice(0, batch.length);
+          tasks.push(limit(async () => {
+            const newRecords = await this.filterDuplicates(currentBatch);
+            if (newRecords.length) {
+              await this.uploadDataModel.insertMany(newRecords, { ordered: false });
+              totalCount += newRecords.length;
+            }
+          }));
         }
+      }
+    }
 
-        batch.push(this._mapRowToDocument(rowObj));
-
-        if (batch.length >= this.BATCH_SIZE) {
-          try {
-            const toFlush = batch.splice(0, batch.length);
-            const added = await this._flushBatch(toFlush);
-            inserted += added;
-          } catch (e: any) {
-            this.logger.warn('Batch flush error (xlsx): ' + (e && e.message ? e.message : JSON.stringify(e)));
-          }
+    if (batch.length > 0) {
+      tasks.push(limit(async () => {
+        const newRecords = await this.filterDuplicates(batch);
+        if (newRecords.length) {
+          await this.uploadDataModel.insertMany(newRecords, { ordered: false });
+          totalCount += newRecords.length;
         }
-      }
+      }));
     }
 
-    if (batch.length) {
-      try {
-        const added = await this._flushBatch(batch.splice(0, batch.length));
-        inserted += added;
-      } catch (e: any) {
-        this.logger.warn('Final batch flush error (xlsx): ' + (e && e.message ? e.message : JSON.stringify(e)));
-      }
+    await Promise.all(tasks);
+    if (totalCount === 0) {
+      throw new BadRequestException('All records in the file already exist');
     }
-
-    return inserted;
+    return { message: 'File uploaded successfully', totalRecords: totalCount };
   }
 
-  /**
-   * Build query filters for fetch/export endpoints
-   */
-  private _buildFilters(query: any) {
-    const filters: any = {};
-    if (query.category) filters.category = query.category;
-    if (query.status) filters.status = query.status;
+  // --- Fetch/filter
+  async filterData(filters: any = {}): Promise<any[]> {
+    const query: any = {};
 
-    if (query.startDate || query.endDate) {
-      filters.createdAt = {};
-      if (query.startDate) filters.createdAt.$gte = new Date(query.startDate);
-      if (query.endDate) {
-        const d = new Date(query.endDate);
-        d.setHours(23, 59, 59, 999);
-        filters.createdAt.$lte = d;
+    if (filters.ticketRefId) {
+      query.ticketRefId = filters.ticketRefId.trim();
+    }
+
+    if (filters.category) query.category = filters.category;
+    if (filters.subCategory) query.subCategory = filters.subCategory;
+    if (filters.description) query.description = filters.description;
+    if (filters.status && filters.status.toLowerCase() !== 'all') query.status = filters.status;
+
+    if (filters.startDate && filters.endDate) {
+      const start = new Date(filters.startDate); start.setHours(0, 0, 0, 0);
+      const end = new Date(filters.endDate); end.setHours(23, 59, 59, 999);
+      query.createdAt = { $gte: start, $lte: end };
+    }
+
+    return this.uploadDataModel.find(query, { _id: 0, __v: 0 }).lean();
+  }
+
+  // --- Export
+  async exportData(filters: any = {}, format: 'excel' | 'csv' = 'excel') {
+    const data = await this.filterData(filters);
+    if (!data.length) throw new BadRequestException('No records found');
+
+    const filename = `upload_export_${Date.now()}.${format === 'excel' ? 'xlsx' : 'csv'}`;
+    const exportsDir = path.join(process.cwd(), 'exports');
+    if (!fs.existsSync(exportsDir)) fs.mkdirSync(exportsDir);
+    const filePath = path.join(exportsDir, filename);
+
+    if (format === 'csv') {
+      const headers = Object.keys(data[0]);
+      const rows = data.map(t => headers.map(h => t[h] ?? '').join(','));
+      fs.writeFileSync(filePath, [headers.join(','), ...rows].join('\n'), 'utf8');
+    } else {
+      // --- Streaming Excel Writer
+      const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+        filename: filePath,
+        useStyles: true,
+        useSharedStrings: true,
+      });
+
+      const worksheet = workbook.addWorksheet('UploadData');
+
+      // Define headers
+      worksheet.columns = Object.keys(data[0]).map(key => ({
+        header: key,
+        key: key,
+        width: 20
+      }));
+
+      // Add rows as a stream
+      for (const record of data) {
+        worksheet.addRow(record).commit(); // commit each row immediately
       }
+
+      await workbook.commit(); // write the file to disk
     }
 
-    if (query.q) {
-      filters.$or = [
-        { 'payload.ticketRefId': { $regex: query.q, $options: 'i' } },
-        { 'payload.description': { $regex: query.q, $options: 'i' } },
-      ];
-    }
-
-    return filters;
+    return { url: `http://localhost:3000/exports/${filename}`, filename };
+  }
+  async deleteFileById(id: string): Promise<boolean> {
+    const result = await this.uploadDataModel.findByIdAndDelete(id);
+    return !!result; // true if deleted, false if not found
   }
 
-  /**
-   * Paginated fetch
-   */
-  async fetch(query: any, paginate = { page: 1, limit: 50 }) {
-    const filters = this._buildFilters(query);
-    const page = paginate.page > 0 ? paginate.page : 1;
-    const limit = paginate.limit > 0 ? paginate.limit : 50;
-
-    const [items, total] = await Promise.all([
-      this.uploadModel.find(filters).skip((page - 1) * limit).limit(limit).lean(),
-      this.uploadModel.countDocuments(filters),
-    ]);
-
-    return { items, total, page, limit };
-  }
-
-  /**
-   * Stream CSV export (applies filters)
-   */
-  async streamExportCsv(res: Response, query: any) {
-    const filters = this._buildFilters(query);
-    const cursor = this.uploadModel.find(filters).lean().cursor();
-    const csvStream = csvFormat({ headers: true });
-    csvStream.pipe(res);
-
-    try {
-      for await (const doc of cursor) {
-        const row = {
-          ...doc.payload,
-          category: doc.category,
-          status: doc.status,
-          createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : '',
-        };
-        csvStream.write(row);
-      }
-    } catch (err) {
-      this.logger.error('Error while streaming CSV export: ' + (err && (err as Error).message ? (err as Error).message : err));
-    } finally {
-      csvStream.end();
-    }
-
-    return new Promise<void>((resolve) => csvStream.on('finish', () => resolve()));
-  }
-
-  /**
-   * Stream XLSX export (applies filters)
-   */
-  async streamExportXlsx(res: Response, query: any) {
-    const filters = this._buildFilters(query);
-    const cursor = this.uploadModel.find(filters).lean().cursor();
-
-    const WorkbookWriterAny: any = (ExcelJS as any).stream?.xlsx?.WorkbookWriter || (ExcelJS as any).stream?.WorkbookWriter;
-    const workbook = new WorkbookWriterAny({ stream: res });
-    const ws = workbook.addWorksheet('Export');
-
-    let headerWritten = false;
-    for await (const doc of cursor) {
-      const rowObj = { ...doc.payload, category: doc.category, status: doc.status, createdAt: doc.createdAt };
-      if (!headerWritten) {
-        ws.addRow(Object.keys(rowObj)).commit();
-        headerWritten = true;
-      }
-      ws.addRow(Object.values(rowObj)).commit();
-    }
-    await workbook.commit();
-  }
 }

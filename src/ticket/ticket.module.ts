@@ -7,13 +7,17 @@ import { TicketController } from './ticket.controller';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: Ticket.name, schema: TicketSchema },
-      { name: Counter.name, schema: CounterSchema },
-    ]),
+    MongooseModule.forFeature(
+      [
+        { name: Ticket.name, schema: TicketSchema },
+        { name: Counter.name, schema: CounterSchema },
+      ],
+      'dashboard-data',
+    ),
+
   ],
   providers: [TicketService], // <-- use TicketService
   controllers: [TicketController],
   exports: [TicketService],
 })
-export class TicketModule {}
+export class TicketModule { }

@@ -1,104 +1,81 @@
-// upload/upload.controller.ts
-import {
-  Controller,
-  Post,
-  UploadedFile,
-  UseInterceptors,
-  BadRequestException,
-  Get,
-  Query,
-  Res,
-  HttpStatus,
-} from '@nestjs/common';
+import { Controller, Post, Get, Delete, Param, UploadedFile, UseInterceptors, Body, BadRequestException, NotFoundException } from '@nestjs/common';
+import { UploadDataService } from '../upload/upload.service';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { UploadService } from './upload.service';
-import type { Response } from 'express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import type { Express } from 'express';
 
-@Controller('upload')
-export class UploadController {
-  constructor(private readonly uploadService: UploadService) {}
+@Controller('upload-data')
+export class UploadDataController {
+  constructor(private readonly uploadDataService: UploadDataService) { }
 
-  // ✅ Inline multer config here
-  @Post('file')
+
+  @Post('upload')
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: './uploads',
-        filename: (req, file, cb) => {
-          const fileExtName = extname(file.originalname);
-          cb(null, `${Date.now()}${fileExtName}`);
+        destination: './uploaddatas',
+        filename: (_, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, uniqueSuffix + extname(file.originalname));
         },
       }),
-      limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
-      fileFilter: (req, file, cb) => {
-        const allowed = ['.csv', '.xls', '.xlsx'];
-        const ext = extname(file.originalname).toLowerCase();
-        if (!allowed.includes(ext)) {
-          return cb(
-            new BadRequestException('Only CSV, XLS, or XLSX files allowed'),
-            false,
-          );
-        }
-        cb(null, true);
+      fileFilter: (_, file, cb) => {
+        const allowed = [
+          'text/csv',
+          'application/vnd.ms-excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/octet-stream',
+        ];
+        if (allowed.includes(file.mimetype)) cb(null, true);
+        else cb(new BadRequestException('Only CSV or Excel files are allowed'), false);
       },
+      limits: { fileSize: 200 * 1024 * 1024 },
     }),
   )
-  async uploadFile(@UploadedFile() file: Express.Multer.File) {
-    if (!file) throw new BadRequestException('File is required');
-    const result = await this.uploadService.parseAndStore(
-      file.path,
-      file.originalname,
-    );
-    return {
-      status: HttpStatus.OK,
-      inserted: result.insertedCount,
-      message: result.message,
-    };
+  async uploadFile(@UploadedFile() file: Express.Multer.File): Promise<any> {
+    if (!file) throw new BadRequestException('File not provided');
+    return this.uploadDataService.parseFileAndSave(file.path, file.size);
   }
 
-  @Get()
-  async fetch(
-    @Query('category') category?: string,
-    @Query('status') status?: string,
-    @Query('startDate') startDate?: string,
-    @Query('endDate') endDate?: string,
-    @Query('page') page = '1',
-    @Query('limit') limit = '50',
-    @Query('q') q?: string,
+  @Post('fetch')
+  async fetchData(
+    @Body() filters: {
+      category?: string;
+      subCategory?: string;
+      description?: string;
+      status?: string;
+      startDate?: string;
+      endDate?: string;
+    } = {},
   ) {
-    return this.uploadService.fetch(
-      { category, status, startDate, endDate, q },
-      { page: Number(page), limit: Number(limit) },
-    );
+    const data = await this.uploadDataService.filterData(filters);
+    return { message: 'Fetch successful', totalRecords: data.length, data };
   }
 
-  @Get('export')
-  async export(
-    @Query('format') format = 'csv',
-    @Query() query: any,
-    @Res() res: Response,
+  @Post('export')
+  async exportData(
+    @Body() filters: {
+      category?: string;
+      subCategory?: string;
+      description?: string;
+      status?: string;
+      startDate?: string;
+      endDate?: string;
+      format?: 'excel' | 'csv';
+    } = {},
   ) {
-    const fmt = (format || 'csv').toLowerCase();
-    if (fmt === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="export_${Date.now()}.csv"`,
-      );
-      await this.uploadService.streamExportCsv(res, query);
-    } else {
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="export_${Date.now()}.xlsx"`,
-      );
-      await this.uploadService.streamExportXlsx(res, query);
+    const format = filters.format || 'excel';
+    const { url, filename } = await this.uploadDataService.exportData(filters, format);
+    return { message: 'Export successful', url, filename };
+  }
+
+  @Delete(':id')
+  async deleteFile(@Param('id') id: string) {
+    const deleted = await this.uploadDataService.deleteFileById(id);
+    if (!deleted) {
+      throw new NotFoundException('File not found');
     }
-    return res;
+    return { message: 'File deleted successfully' };
   }
 }

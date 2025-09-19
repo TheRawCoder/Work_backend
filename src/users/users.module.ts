@@ -1,3 +1,4 @@
+// src/users/users.module.ts
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { UsersService } from './users.service';
@@ -7,7 +8,7 @@ import { JwtModule } from '@nestjs/jwt';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }], 'dashboard-data'),
     JwtModule.register({
       secret: process.env.JWT_SECRET || 'secret123',
       signOptions: { expiresIn: '1d' },
@@ -15,6 +16,6 @@ import { JwtModule } from '@nestjs/jwt';
   ],
   controllers: [UsersController],
   providers: [UsersService],
-  exports: [UsersService], // export if used in other modules
+  exports: [UsersService],
 })
-export class UsersModule {}
+export class UsersModule { }

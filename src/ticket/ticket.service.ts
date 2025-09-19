@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import {
   Injectable,
   NotFoundException,
@@ -17,9 +18,9 @@ import { UpdateStatusDto } from './dto/update-status.dto';
 @Injectable()
 export class TicketService {
   constructor(
-    @InjectModel(Ticket.name) private ticketModel: Model<TicketDocument>,
-    @InjectModel(Counter.name) private counterModel: Model<CounterDocument>,
-  ) {}
+    @InjectModel(Ticket.name, 'dashboard-data') private ticketModel: Model<TicketDocument>,
+    @InjectModel(Counter.name, 'dashboard-data') private counterModel: Model<CounterDocument>,
+  ) { }
 
   private async getNextSequence(key = 'ticket'): Promise<number> {
     const updated = await this.counterModel

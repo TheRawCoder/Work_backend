@@ -1,3 +1,4 @@
+// src/users/users.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -6,18 +7,18 @@ import * as bcrypt from 'bcryptjs';
 
 @Injectable()
 export class UsersService {
-  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  constructor(@InjectModel(User.name, 'dashboard-data') private userModel: Model<UserDocument>) { }
 
   // Get all users (without passwords)
   async findAll(): Promise<User[]> {
-    return this.userModel.find().select('-password');
+    return this.userModel.find().select('-password').lean();
   }
 
   // Get single user by ID
   async findOne(id: string): Promise<User> {
-    const user = await this.userModel.findById(id).select('-password');
+    const user = await this.userModel.findById(id).select('-password').lean();
     if (!user) throw new NotFoundException('User not found');
-    return user;
+    return user as any;
   }
 
   // Create a new user
@@ -37,9 +38,10 @@ export class UsersService {
     }
     const updatedUser = await this.userModel
       .findByIdAndUpdate(id, updateData, { new: true })
-      .select('-password');
+      .select('-password')
+      .lean();
     if (!updatedUser) throw new NotFoundException('User not found');
-    return updatedUser;
+    return updatedUser as any;
   }
 
   // Delete user
@@ -50,25 +52,21 @@ export class UsersService {
 
   // Find user by email
   async findByEmail(email: string): Promise<User | null> {
-    return this.userModel.findOne({ email });
+    return this.userModel.findOne({ email }).exec();
   }
 
-  // Add this method to your existing users.service.ts
-
+  // Update password helper
   async updatePassword(userId: string, hashedPassword: string) {
-    return await this.userModel.updateOne(
-      { _id: userId },
-      { password: hashedPassword },
-    );
+    return await this.userModel.updateOne({ _id: userId }, { password: hashedPassword });
   }
 
-  // Optional: login helper function
+  // Validate user (login)
   async validateUser(email: string, password: string): Promise<User | null> {
-    const user = await this.userModel.findOne({ email });
+    const user = await this.userModel.findOne({ email }).exec();
     if (!user) return null;
-    const passwordMatches = await bcrypt.compare(password, user.password);
+    const passwordMatches = await bcrypt.compare(password, (user as any).password);
     if (!passwordMatches) return null;
-    return user;
+    return user as any;
   }
 
   // Optional: stats

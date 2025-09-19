@@ -1,17 +1,18 @@
-// upload/upload.module.ts
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
-import { UploadController } from './upload.controller';
-import { UploadService } from './upload.service';
 import { UploadData, UploadDataSchema } from './schema/upload-data.schema';
+import { UploadDataService } from './upload.service';
+import { UploadDataController } from './upload.controller';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: UploadData.name, schema: UploadDataSchema },
-    ]),
+    MongooseModule.forFeature(
+      [{ name: UploadData.name, schema: UploadDataSchema }],
+      'dashboard-data', // 👈 also use ticket_project connection
+    ),
   ],
-  controllers: [UploadController],
-  providers: [UploadService],
+  providers: [UploadDataService],
+  controllers: [UploadDataController],
+  exports: [UploadDataService],
 })
-export class UploadModule {}
+export class UploadDataModule { }

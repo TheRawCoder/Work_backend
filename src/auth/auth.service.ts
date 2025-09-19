@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// src/auth/auth.service.ts
 import {
   Injectable,
   UnauthorizedException,
@@ -22,9 +24,9 @@ export class AuthService {
   constructor(
     private readonly users: UsersService,
     private readonly jwt: JwtService,
-    @InjectModel(OTP.name) private readonly otpModel: Model<OTPDocument>,
+    @InjectModel(OTP.name, 'dashboard-data') private readonly otpModel: Model<OTPDocument>,
     private readonly emailService: EmailService,
-  ) {}
+  ) { }
 
   async validateUser(email: string, password: string) {
     const user = await this.users.findByEmail(email);
@@ -89,12 +91,14 @@ export class AuthService {
 
     const otp = this.generateOTP();
 
+    // remove old OTPs for this email and create a fresh one
     await this.otpModel.deleteMany({ email });
-    await this.otpModel.create({ email, otp });
+    await this.otpModel.create({ email, otp, isUsed: false });
 
     try {
       await this.emailService.sendOTPEmail(email, otp);
     } catch (error) {
+      console.error('Email send failed', error);
       throw new BadRequestException('Failed to send OTP email');
     }
 
@@ -133,6 +137,7 @@ export class AuthService {
       throw new BadRequestException('Passwords do not match');
     }
 
+    // require a verified OTP (isUsed: true) created recently
     const otpRecord = await this.otpModel.findOne({
       email,
       otp,
